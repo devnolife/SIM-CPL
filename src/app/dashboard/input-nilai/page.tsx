@@ -1,384 +1,485 @@
 'use client';
 
-import { useState, useEffect } from 'react';
-import { useRouter } from 'next/navigation';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import Link from 'next/link';
+import { ArrowRight, Loader2 } from 'lucide-react';
+import {
+  errorMessage,
+  fetchCPMKByMK,
+  fetchMahasiswaSummary,
+  fetchMKByProdiSemester,
+  fetchNilaiMK,
+  importNilai,
+  type CPMKMaster,
+  type MahasiswaSummary,
+  type MK,
+} from '@/lib/simcplApi';
+import { useConfig, useThresholds } from '@/lib/config';
+import { fmt1, fmt2, round1, sortByKode } from '@/lib/format';
+import { statusOf } from '@/lib/status';
+import { useProdi } from '@/components/sim/useProdi';
+import { StudentPicker } from '@/components/sim/StudentPicker';
+import { EmptyState, Field, Notice, PageHeader, SEMESTERS, Select, Skeleton, StatusTag } from '@/components/sim/ui';
+import { cn } from '@/lib/utils';
 
-const API_BASE =   process.env.NEXT_PUBLIC_API_URL
- || 'http://localhost:8001/api';
+type Saved = { mk: string; nama: string; nilai: number; replaced: boolean };
 
-// --- TIPE DATA ---
-type Prodi = { 
-  id_prodi: number; 
-  kode_prodi: string; 
-  nama_prodi: string 
-};
-
-type MahasiswaSummary = { 
-  id_mhs: number; 
-  nim: string; 
-  nama: string; 
-  angkatan: number; 
-  semester_max: number; 
-  total_nilai: number 
-};
-
-type MK = { 
-  id_mk: string;      
-  kode_mk: string; 
-  nama_mk: string; 
-  sks: number; 
-  semester: number; 
-  cpl_terkait: string[] 
-};
-
-type CPMK = { 
-  id: string;         
-  kode_cpmk: string; 
-  deskripsi: string; 
-  bobot: number | null; 
-};
+function parseNilai(raw: string): { value: number | null; error: string | null } {
+  const t = raw.trim().replace(',', '.');
+  if (!t) return { value: null, error: null };
+  const n = Number(t);
+  if (!Number.isFinite(n)) return { value: null, error: 'Masukkan angka, mis. 78 atau 78,5.' };
+  if (n < 0 || n > 100) return { value: null, error: 'Nilai harus di antara 0 dan 100.' };
+  return { value: round1(n), error: null };
+}
 
 export default function InputNilaiPage() {
-  const router = useRouter();
+  const config = useConfig();
+  const thresholds = useThresholds();
+  const prodi = useProdi();
+  const [semester, setSemester] = useState(1);
 
-  // --- STATE ---
-  const [prodiList, setProdiList] = useState<Prodi[]>([]);
-  const [mahasiswaList, setMahasiswaList] = useState<MahasiswaSummary[]>([]);
+  const [students, setStudents] = useState<MahasiswaSummary[]>([]);
+  const [loadingStudents, setLoadingStudents] = useState(false);
+  const [nim, setNim] = useState<string | null>(null);
+
   const [mkList, setMkList] = useState<MK[]>([]);
-  const [cpmkList, setCpmkList] = useState<CPMK[]>([]);
+  const [loadingMk, setLoadingMk] = useState(false);
+  const [grades, setGrades] = useState<Record<string, number>>({});
+  const [gradesVersion, setGradesVersion] = useState(0);
+  const [error, setError] = useState<string | null>(null);
 
-  const [selectedProdi, setSelectedProdi] = useState<Prodi | null>(null);
-  const [selectedSemester, setSelectedSemester] = useState(1);
-  const [selectedMahasiswa, setSelectedMahasiswa] = useState<MahasiswaSummary | null>(null);
-  const [selectedMK, setSelectedMK] = useState<MK | null>(null);
+  const [selectedMk, setSelectedMk] = useState<string | null>(null);
+  const editorRef = useRef<HTMLDivElement>(null);
 
-  const [loadingProdi, setLoadingProdi] = useState(true);
-  const [loadingMahasiswa, setLoadingMahasiswa] = useState(false);
-  const [loadingMK, setLoadingMK] = useState(false);
-  const [loadingCPMK, setLoadingCPMK] = useState(false);
-  const [saving, setSaving] = useState(false);
+  const idProdi = prodi.selected?.id_prodi ?? null;
 
-  const [nilaiMK, setNilaiMK] = useState('');
-  const [showResult, setShowResult] = useState(false);
-  const [calculatedCPMK, setCalculatedCPMK] = useState<any[]>([]);
-  const [calculatedCPL, setCalculatedCPL] = useState<any[]>([]);
-  const [saveSuccess, setSaveSuccess] = useState(false);
-  const [refreshKey, setRefreshKey] = useState(0);
-
-  // --- EFFECTS ---
-
-  // Listen update
+  // Semua mahasiswa prodi (input nilai juga untuk mahasiswa yang belum punya nilai semester ini).
   useEffect(() => {
-    const handleNilaiUpdate = (event: any) => {
-      setRefreshKey(prev => prev + 1);
-    };
-    window.addEventListener('nilaiUpdated', handleNilaiUpdate);
-    return () => window.removeEventListener('nilaiUpdated', handleNilaiUpdate);
-  }, []);
-
-  // 1. Load Prodi
-  useEffect(() => {
-    const controller = new AbortController();
-    setLoadingProdi(true);
-    fetch(`${API_BASE}/prodi`, { signal: controller.signal })
-      .then(res => res.json())
-      .then((data: Prodi[]) => {
-        setProdiList(data);
-        if (data.length > 0 && !selectedProdi) setSelectedProdi(data[0]);
+    if (!idProdi) return;
+    const ctrl = new AbortController();
+    setLoadingStudents(true);
+    fetchMahasiswaSummary(idProdi, { signal: ctrl.signal })
+      .then((list) => {
+        setStudents(list);
+        setNim((cur) => (cur && list.some((s) => s.nim === cur) ? cur : list[0]?.nim ?? null));
       })
-      .catch(err => { if (err.name !== 'AbortError') console.error(err); })
-      .finally(() => setLoadingProdi(false));
-    return () => controller.abort();
-  }, []);
-
-  // 2. Load Mahasiswa
-  useEffect(() => {
-    if (!selectedProdi) { setMahasiswaList([]); return; }
-    const controller = new AbortController();
-    setLoadingMahasiswa(true);
-    fetch(`${API_BASE}/prodi/${selectedProdi.id_prodi}/mahasiswa-nilai`, { signal: controller.signal })
-      .then(res => res.json())
-      .then((data: MahasiswaSummary[]) => {
-        setMahasiswaList(Array.isArray(data) ? data : []);
-        if (Array.isArray(data) && data.length > 0) {
-          const currentExists = data.find(m => m.nim === selectedMahasiswa?.nim);
-          if (!currentExists) setSelectedMahasiswa(data[0]);
-        } else setSelectedMahasiswa(null);
+      .catch((err) => {
+        if (err.name !== 'AbortError') setError(errorMessage(err));
       })
-      .catch(err => { if (err.name !== 'AbortError') setMahasiswaList([]); })
-      .finally(() => setLoadingMahasiswa(false));
-    return () => controller.abort();
-  }, [selectedProdi, refreshKey]);
+      .finally(() => setLoadingStudents(false));
+    return () => ctrl.abort();
+  }, [idProdi]);
 
-  // 3. Load MK
   useEffect(() => {
-    if (!selectedProdi) { setMkList([]); return; }
-    const controller = new AbortController();
-    setLoadingMK(true);
-    fetch(`${API_BASE}/prodi/${selectedProdi.id_prodi}/mk?semester=${selectedSemester}`, { signal: controller.signal })
-      .then(res => res.json())
-      .then((data: MK[]) => {
-        setMkList(Array.isArray(data) ? data : []);
-        setSelectedMK(null);
+    if (!idProdi) return;
+    const ctrl = new AbortController();
+    setLoadingMk(true);
+    setSelectedMk(null);
+    fetchMKByProdiSemester(idProdi, semester, ctrl.signal)
+      .then((list) => setMkList(sortByKode(list, (m) => m.kode_mk)))
+      .catch((err) => {
+        if (err.name !== 'AbortError') {
+          setMkList([]);
+          setError(errorMessage(err));
+        }
       })
-      .catch(err => { if (err.name !== 'AbortError') setMkList([]); })
-      .finally(() => setLoadingMK(false));
-    return () => controller.abort();
-  }, [selectedProdi, selectedSemester]);
+      .finally(() => setLoadingMk(false));
+    return () => ctrl.abort();
+  }, [idProdi, semester]);
 
-  // 4. Load CPMK (Fix ID MK)
+  // Nilai yang sudah tersimpan untuk mahasiswa terpilih.
   useEffect(() => {
-    if (!selectedMK || !selectedMK.id_mk) { setCpmkList([]); return; }
-    
-    const controller = new AbortController();
-    setLoadingCPMK(true);
-    fetch(`${API_BASE}/mk/${selectedMK.id_mk}/cpmk`, { signal: controller.signal })
-      .then(res => res.json())
-      .then((data: CPMK[]) => {
-        setCpmkList(Array.isArray(data) ? data : []);
-      })
-      .catch(err => { if (err.name !== 'AbortError') setCpmkList([]); })
-      .finally(() => setLoadingCPMK(false));
-    return () => controller.abort();
-  }, [selectedMK]);
-
-  // --- HANDLERS ---
-
-  const handleCalculate = () => {
-    if (!selectedMK || !nilaiMK) return;
-
-    const nilai = parseFloat(nilaiMK);
-    if (isNaN(nilai) || nilai < 0 || nilai > 100) {
-      alert('Masukkan nilai antara 0-100');
+    if (!nim) {
+      setGrades({});
       return;
     }
+    const ctrl = new AbortController();
+    fetchNilaiMK(nim, ctrl.signal)
+      .then((list) => {
+        const next: Record<string, number> = {};
+        list.forEach((n) => (next[n.id_mk] = n.nilai_angka));
+        setGrades(next);
+      })
+      .catch((err) => {
+        if (err.name !== 'AbortError') setGrades({});
+      });
+    return () => ctrl.abort();
+  }, [nim, gradesVersion]);
 
-    // 1. Hitung Kontribusi CPMK
-    const cpmkResults = cpmkList.map((cpmk) => {
-      const rawBobot = cpmk.bobot ?? 0;
-      const bobotPersen = rawBobot <= 1 && rawBobot > 0 ? rawBobot * 100 : rawBobot;
-      
-      const effectiveBobot = (cpmk.bobot !== null)
-        ? bobotPersen
-        : (cpmkList.length > 0 ? 100 / cpmkList.length : 0);
+  const student = students.find((s) => s.nim === nim) ?? null;
+  const mk = mkList.find((m) => m.id_mk === selectedMk) ?? null;
+  const filled = mkList.filter((m) => grades[m.id_mk] !== undefined).length;
 
-      const nilaiKontribusi = nilai * (effectiveBobot / 100);
-      
-      return {
-        id: cpmk.id,
-        kode: cpmk.kode_cpmk,
-        deskripsi: cpmk.deskripsi,
-        bobot: Math.round(effectiveBobot * 10) / 10,
-        nilai: Math.round(nilaiKontribusi * 100) / 100, 
-      };
-    });
-
-    setCalculatedCPMK(cpmkResults);
-
-    // 2. Ambil List CPL (Hanya Kode) & HAPUS DUPLIKAT
-    // [FIX] Menggunakan Set untuk memastikan kode CPL unik
-    const uniqueCPLs = Array.from(new Set(selectedMK.cpl_terkait || []));
-    
-    const cplResults = uniqueCPLs.map(cplKode => ({
-      kode: cplKode,
-    }));
-
-    setCalculatedCPL(cplResults);
-    setShowResult(true);
+  const choose = (id: string) => {
+    setSelectedMk(id);
+    // Di layar sempit editor ada di bawah daftar.
+    if (window.matchMedia('(max-width: 1023px)').matches) {
+      requestAnimationFrame(() => editorRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }));
+    }
   };
 
-  const handleSave = async () => {
-    if (!selectedMK || !selectedMahasiswa || !nilaiMK || !selectedProdi) return;
-    const nilai = parseFloat(nilaiMK);
-    setSaving(true);
-    
-    try {
-      const response = await fetch(`${API_BASE}/nilai-mk/import`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          prodiKode: selectedProdi.kode_prodi,
-          semester: selectedSemester,
-          tahunAjaran: `${new Date().getFullYear()}/${new Date().getFullYear() + 1}`,
-          matkulList: [{
-            kode: selectedMK.kode_mk,
-            nama: selectedMK.nama_mk,
-            sks: selectedMK.sks
-          }],
-          importData: [{
-            nim: selectedMahasiswa.nim,
-            nama: selectedMahasiswa.nama,
-            nilaiMap: { [selectedMK.kode_mk]: nilai }
-          }]
-        })
-      });
+  return (
+    <>
+      <PageHeader
+        title="Input nilai"
+        description="Masukkan nilai akhir mata kuliah satu per satu. Nilai CPMK dan CPL mahasiswa dihitung ulang setelah disimpan. Untuk banyak mahasiswa sekaligus, gunakan impor Excel."
+        actions={
+          <Link href="/dashboard/manajemen" className="btn btn-secondary">
+            Impor dari Excel
+          </Link>
+        }
+      />
 
-      if (response.ok) {
-        setSaveSuccess(true);
-        window.dispatchEvent(new CustomEvent('nilaiUpdated', {
-          detail: { 
-            mahasiswaNim: selectedMahasiswa.nim, 
-            mkKode: selectedMK.kode_mk, 
-            nilaiAkhir: nilai, 
-            source: 'input-nilai', 
-            timestamp: new Date().toISOString() 
+      <div className="sheet mb-6 grid grid-cols-1 gap-4 p-4 sm:grid-cols-2 lg:grid-cols-[1fr_200px_1.4fr]">
+        <Field label="Program studi" htmlFor="f-prodi">
+          <Select
+            id="f-prodi"
+            value={idProdi ?? ''}
+            disabled={prodi.loading}
+            onChange={(v) => {
+              prodi.setSelectedId(Number(v));
+              setNim(null);
+              setStudents([]);
+              setGrades({});
+            }}
+          >
+            {prodi.list.map((p) => (
+              <option key={p.id_prodi} value={p.id_prodi}>
+                {p.nama_prodi}
+              </option>
+            ))}
+          </Select>
+        </Field>
+        <Field label="Semester mata kuliah" htmlFor="f-semester">
+          <Select id="f-semester" value={semester} onChange={(v) => setSemester(Number(v))}>
+            {SEMESTERS.map((s) => (
+              <option key={s} value={s}>
+                Semester {s}
+              </option>
+            ))}
+          </Select>
+        </Field>
+        <Field label="Mahasiswa" htmlFor="f-mhs" className="sm:col-span-2 lg:col-span-1">
+          <StudentPicker
+            id="f-mhs"
+            students={students}
+            value={nim}
+            onChange={(v) => {
+              setNim(v);
+              setSelectedMk(null);
+            }}
+            loading={loadingStudents}
+          />
+        </Field>
+      </div>
+
+      {(prodi.error || error) && (
+        <Notice tone="error" title="Data tidak dapat dimuat" className="mb-6">
+          {prodi.error || error}
+        </Notice>
+      )}
+
+      {!loadingStudents && students.length === 0 && !error ? (
+        <EmptyState
+          title={`Belum ada mahasiswa di ${prodi.selected?.nama_prodi ?? 'prodi ini'}`}
+          action={
+            <Link href="/dashboard/manajemen" className="btn btn-secondary">
+              Impor data mahasiswa <ArrowRight aria-hidden />
+            </Link>
           }
-        }));
-        
-        setTimeout(() => {
-          setSaveSuccess(false); 
-          setSelectedMK(null); 
-          setNilaiMK(''); 
-          setShowResult(false); 
-          setCalculatedCPMK([]); 
-          setCalculatedCPL([]); 
-          setRefreshKey(prev => prev + 1);
-        }, 2000);
-      } else {
-        const errData = await response.json();
-        alert(`Gagal menyimpan nilai: ${errData.error || 'Unknown error'}`);
-      }
+        >
+          Mahasiswa ditambahkan melalui impor nilai dari file Excel.
+        </EmptyState>
+      ) : (
+        <div className="grid grid-cols-1 items-start gap-6 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
+          <section aria-labelledby="h-mk" className="sheet overflow-hidden">
+            <div className="flex items-baseline justify-between gap-3 border-b border-line px-4 py-3">
+              <h2 id="h-mk" className="text-[15px] font-semibold">
+                Mata kuliah semester {semester}
+              </h2>
+              {mkList.length > 0 && student && (
+                <p className="num text-[13px] text-ink-500">
+                  {filled}/{mkList.length} sudah bernilai
+                </p>
+              )}
+            </div>
+
+            {loadingMk ? (
+              <ul className="divide-y divide-line">
+                {Array.from({ length: 6 }).map((_, i) => (
+                  <li key={i} className="px-4 py-3">
+                    <Skeleton className="h-4 w-3/4" />
+                  </li>
+                ))}
+              </ul>
+            ) : mkList.length === 0 ? (
+              <p className="px-4 py-8 text-center text-[13.5px] text-ink-600">Tidak ada mata kuliah terdaftar di semester {semester}.</p>
+            ) : (
+              <ul className="divide-y divide-line">
+                {mkList.map((m) => {
+                  const nilai = grades[m.id_mk];
+                  const active = m.id_mk === selectedMk;
+                  return (
+                    <li key={m.id_mk}>
+                      <button
+                        type="button"
+                        onClick={() => choose(m.id_mk)}
+                        aria-pressed={active}
+                        disabled={!student}
+                        className={cn(
+                          'grid w-full grid-cols-[minmax(0,1fr)_auto] items-center gap-x-4 px-4 py-2.5 text-left transition-colors disabled:cursor-not-allowed',
+                          active ? 'bg-brand-soft/60' : 'hover:bg-ink-50',
+                        )}
+                      >
+                        <span className="min-w-0">
+                          <span className="flex items-baseline gap-2">
+                            <span className="code shrink-0">{m.kode_mk}</span>
+                            <span className="truncate text-[13.5px] text-ink-900">{m.nama_mk}</span>
+                          </span>
+                          <span className="mt-0.5 block text-[12px] text-ink-500">
+                            {m.sks} SKS{m.cpl_terkait && m.cpl_terkait.length > 0 ? ` · ${m.cpl_terkait.join(', ')}` : ''}
+                          </span>
+                        </span>
+                        <span className="text-right">
+                          {nilai === undefined ? (
+                            <span className="text-[12.5px] text-ink-500">belum ada</span>
+                          ) : (
+                            <span className="num text-[14px] font-semibold">{fmt1(nilai)}</span>
+                          )}
+                        </span>
+                      </button>
+                    </li>
+                  );
+                })}
+              </ul>
+            )}
+          </section>
+
+          <div ref={editorRef} className="scroll-mt-20">
+            {mk && student ? (
+              <GradeEditor
+                key={`${mk.id_mk}-${student.nim}`}
+                mk={mk}
+                student={student}
+                semester={semester}
+                prodiKode={prodi.selected?.kode_prodi ?? ''}
+                tahunAjaran={config.tahunAjaran}
+                current={grades[mk.id_mk]}
+                thresholds={thresholds}
+                onSaved={() => setGradesVersion((v) => v + 1)}
+              />
+            ) : (
+              <div className="rounded-lg border border-dashed border-line-strong px-6 py-12 text-center text-[13.5px] text-ink-600">
+                {student ? 'Pilih mata kuliah di sebelah kiri untuk memasukkan nilai.' : 'Pilih mahasiswa terlebih dahulu.'}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+    </>
+  );
+}
+
+/* ── Editor nilai satu MK ──────────────────────────────────────────────── */
+
+function GradeEditor({
+  mk,
+  student,
+  semester,
+  prodiKode,
+  tahunAjaran,
+  current,
+  thresholds,
+  onSaved,
+}: {
+  mk: MK;
+  student: MahasiswaSummary;
+  semester: number;
+  prodiKode: string;
+  tahunAjaran: string;
+  current: number | undefined;
+  thresholds: { tercapai: number; cukup: number };
+  onSaved: () => void;
+}) {
+  const [raw, setRaw] = useState(current === undefined ? '' : String(current).replace('.', ','));
+  const [touched, setTouched] = useState(false);
+  const [cpmk, setCpmk] = useState<CPMKMaster[] | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState<Saved | null>(null);
+  const [saveError, setSaveError] = useState<string | null>(null);
+
+  useEffect(() => {
+    const ctrl = new AbortController();
+    fetchCPMKByMK(mk.id_mk, ctrl.signal)
+      .then(setCpmk)
+      .catch((err) => {
+        if (err.name !== 'AbortError') setCpmk([]);
+      });
+    return () => ctrl.abort();
+  }, [mk.id_mk]);
+
+  const { value, error } = parseNilai(raw);
+  const showError = touched && error;
+  const unchanged = value !== null && current !== undefined && value === current;
+
+  // Bobot CPMK; jika belum ditentukan, dibagi rata (aturan yang sama dengan backend).
+  const rows = useMemo(() => {
+    if (!cpmk) return [];
+    const even = cpmk.length ? 1 / cpmk.length : 0;
+    return cpmk.map((c) => {
+      const w = c.bobot ?? even;
+      return { ...c, w, poin: value === null ? null : value * w };
+    });
+  }, [cpmk, value]);
+  const weightsGuessed = cpmk?.some((c) => c.bobot === null) ?? false;
+
+  const save = async () => {
+    setTouched(true);
+    if (value === null || error) return;
+    setSaving(true);
+    setSaveError(null);
+    setSaved(null);
+    try {
+      await importNilai({
+        prodiKode,
+        semester,
+        tahunAjaran,
+        matkulList: [{ kode: mk.kode_mk, nama: mk.nama_mk, sks: mk.sks }],
+        importData: [{ nim: student.nim, nama: student.nama, nilaiMap: { [mk.kode_mk]: value } }],
+      });
+      setSaved({ mk: mk.kode_mk, nama: student.nama, nilai: value, replaced: current !== undefined });
+      onSaved();
     } catch (err) {
-      alert('Gagal menyimpan nilai. Silakan coba lagi.');
+      setSaveError(errorMessage(err));
     } finally {
       setSaving(false);
     }
   };
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-blue-50 via-white to-blue-50 p-6">
-      {saveSuccess && (
-        <div className="fixed top-4 right-4 z-50 animate-slide-in">
-          <div className="bg-green-500 text-white px-6 py-4 rounded-lg shadow-lg flex items-center space-x-3">
-            <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" /></svg>
-            <div><p className="font-semibold">Nilai Berhasil Disimpan!</p><p className="text-sm">Data akan ditampilkan di Dashboard & Laporan</p></div>
-          </div>
-        </div>
-      )}
+    <section aria-labelledby="h-editor" className="sheet">
+      <header className="border-b border-line px-4 py-3">
+        <p className="text-[13px] text-ink-500">
+          {student.nama} · <span className="code text-[12px] text-ink-500">{student.nim}</span>
+        </p>
+        <h2 id="h-editor" className="mt-0.5 text-[15px] font-semibold">
+          <span className="code mr-2 text-[14px]">{mk.kode_mk}</span>
+          {mk.nama_mk}
+        </h2>
+      </header>
 
-      <div className="mb-6">
-        <h1 className="text-3xl font-bold text-gray-800 mb-2 flex items-center">
-          <svg xmlns="http://www.w3.org/2000/svg" className="h-8 w-8 mr-3 text-blue-600" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" /></svg>
-          Input Nilai Mahasiswa
-        </h1>
-        <p className="text-gray-600">Input nilai mata kuliah, sistem otomatis menghitung CPMK dan CPL</p>
-      </div>
-
-      <div className="bg-white rounded-xl shadow-md p-6 mb-6 border border-blue-100">
-        <h3 className="text-lg font-semibold text-gray-800 mb-4 flex items-center">
-          <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 mr-2 text-blue-600" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 4a1 1 0 011-1h16a1 1 0 011 1v2.586a1 1 0 01-0.293 0.707l-6.414 6.414a1 1 0 00-0.293 0.707V17l-4 4v-6.586a1 1 0 00-0.293-0.707L3.293 7.293A1 1 0 013 6.586V4z" /></svg>
-          Filter Data
-        </h3>
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-2">Program Studi</label>
-            <select value={selectedProdi?.id_prodi || ''} onChange={(e) => { const prodi = prodiList.find(p => p.id_prodi === Number(e.target.value)); setSelectedProdi(prodi || null); setSelectedMahasiswa(null); setSelectedMK(null); }} className="w-full px-4 py-2.5 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500" disabled={loadingProdi}>
-              {loadingProdi ? <option>Loading...</option> : prodiList.map((prodi) => (<option key={prodi.id_prodi} value={prodi.id_prodi}>{prodi.nama_prodi}</option>))}
-            </select>
-          </div>
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-2">Semester</label>
-            <select value={selectedSemester} onChange={(e) => { setSelectedSemester(Number(e.target.value)); setSelectedMK(null); }} className="w-full px-4 py-2.5 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500">
-              {[1, 2, 3, 4, 5, 6, 7, 8].map((sem) => (<option key={sem} value={sem}>Semester {sem}</option>))}
-            </select>
-          </div>
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-2">Mahasiswa</label>
-            <select value={selectedMahasiswa?.nim || ''} onChange={(e) => { const mhs = mahasiswaList.find(m => m.nim === e.target.value); setSelectedMahasiswa(mhs || null); setSelectedMK(null); }} className="w-full px-4 py-2.5 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500" disabled={loadingMahasiswa || mahasiswaList.length === 0}>
-              {loadingMahasiswa ? <option>Loading...</option> : mahasiswaList.length === 0 ? <option>Tidak ada mahasiswa</option> : mahasiswaList.map((mhs) => (<option key={mhs.nim} value={mhs.nim}>{mhs.nim} - {mhs.nama}</option>))}
-            </select>
-          </div>
-        </div>
-        {selectedMahasiswa && (
-          <div className="mt-4 p-4 bg-gradient-to-r from-blue-50 to-blue-100 rounded-lg border border-blue-200">
-            <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
-              <div><span className="text-gray-600">Prodi:</span><p className="font-semibold text-gray-800">{selectedProdi?.nama_prodi}</p></div>
-              <div><span className="text-gray-600">Nim:</span><p className="font-semibold text-gray-800">{selectedMahasiswa.nim}</p></div>
-              <div><span className="text-gray-600">Nama:</span><p className="font-semibold text-gray-800">{selectedMahasiswa.nama}</p></div>
-              <div><span className="text-gray-600">Angkatan:</span><p className="font-semibold text-gray-800">{selectedMahasiswa.angkatan}</p></div>
-            </div>
-          </div>
-        )}
-      </div>
-
-      <div className="bg-white rounded-xl shadow-md p-6 mb-6 border border-blue-100">
-        <h3 className="text-lg font-semibold text-gray-800 mb-4">Pilih Mata Kuliah (Semester {selectedSemester})</h3>
-        {loadingMK ? <div className="text-center py-8 text-gray-500 italic">Memuat mata kuliah...</div> : mkList.length === 0 ? <div className="text-center py-8 text-gray-500"><p>Tidak ada mata kuliah di semester ini</p></div> : (
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-            {mkList.map((mk) => (
-              <button key={mk.id_mk} onClick={() => { setSelectedMK(mk); setNilaiMK(''); setShowResult(false); }} className={`p-4 rounded-lg border-2 transition-all text-left ${selectedMK?.id_mk === mk.id_mk ? 'border-blue-500 bg-blue-50 shadow-md' : 'border-gray-200 hover:border-blue-300'}`}>
-                <div className="flex items-start justify-between mb-2"><h4 className="font-semibold text-gray-800">{mk.nama_mk}</h4><span className="px-2 py-1 bg-blue-100 text-blue-800 text-xs rounded-full">{mk.sks} SKS</span></div>
-                <p className="text-sm text-gray-600 mb-2">Kode: {mk.kode_mk}</p>
-                <div className="mt-2 flex flex-wrap gap-1">
-                  {/* [FIX] Deduplikasi CPL di tampilan Card MK */}
-                  {Array.from(new Set(mk.cpl_terkait || [])).map((cpl: string) => (
-                    <span key={cpl} className="px-2 py-0.5 bg-green-100 text-green-700 text-xs rounded">{cpl}</span>
-                  ))}
-                </div>
-              </button>
-            ))}
-          </div>
-        )}
-      </div>
-
-      {selectedMK && (
-        <div className="bg-white rounded-xl shadow-md p-6 border border-blue-100">
-          <h3 className="text-lg font-semibold text-gray-800 mb-4">Input Nilai: {selectedMK.nama_mk}</h3>
-          <div className="max-w-md">
-            <label className="block text-sm font-medium text-gray-700 mb-2">Nilai Mata Kuliah (0-100)</label>
-            <div className="flex gap-4">
-              <input type="number" value={nilaiMK} onChange={(e) => setNilaiMK(e.target.value)} min="0" max="100" step="0.1" placeholder="Masukkan nilai" className="flex-1 px-4 py-2.5 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500" />
-              <button onClick={handleCalculate} className="px-6 py-2.5 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors font-medium shadow-md">Hitung</button>
-            </div>
-          </div>
-
-          {showResult && (
-            <div className="mt-6 space-y-6">
-              {/* CPMK Results (Weighted Contribution) */}
-              <div className="border border-blue-200 rounded-lg p-4 bg-blue-50">
-                <h4 className="font-semibold text-gray-800 mb-3">Breakdown Nilai CPMK (Berdasarkan Bobot)</h4>
-                {loadingCPMK ? <p className="text-gray-500 italic">Memuat CPMK...</p> : (
-                  <div className="space-y-2">
-                    {calculatedCPMK.length > 0 ? calculatedCPMK.map((cpmk) => (
-                      <div key={cpmk.kode} className="flex justify-between items-center p-3 bg-white rounded-lg">
-                        <div className="flex-1">
-                          <p className="text-sm font-medium text-gray-800">{cpmk.deskripsi}</p>
-                          <p className="text-xs text-gray-500">Bobot: {cpmk.bobot}%</p>
-                        </div>
-                        <div className="text-right">
-                          <p className="text-[10px] text-gray-400 uppercase mb-1">Kontribusi</p>
-                          <span className="px-3 py-1 bg-blue-100 text-blue-800 font-bold rounded-lg text-lg">
-                            {cpmk.nilai}
-                          </span>
-                        </div>
-                      </div>
-                    )) : <p className="text-sm text-gray-500 italic">Mata kuliah ini belum memiliki CPMK.</p>}
-                  </div>
-                )}
-              </div>
-
-              {/* CPL Results (Tags Only) */}
-              <div className="border border-green-200 rounded-lg p-4 bg-green-50">
-                <h4 className="font-semibold text-gray-800 mb-3">CPL Terkait</h4>
-                {calculatedCPL.length > 0 ? (
-                  <div className="flex flex-wrap gap-2">
-                    {calculatedCPL.map((cpl) => (
-                      <div key={cpl.kode} className="px-4 py-2 bg-white border border-green-200 rounded-lg shadow-sm hover:shadow-md transition-shadow">
-                        <span className="font-bold text-green-700">{cpl.kode}</span>
-                      </div>
-                    ))}
-                  </div>
-                ) : <p className="text-sm text-gray-500 italic">Tidak ada CPL yang terkait langsung.</p>}
-              </div>
-
-              <div className="flex gap-4">
-                <button onClick={handleSave} disabled={saving} className="flex-1 px-6 py-3 bg-gradient-to-r from-blue-600 to-blue-700 text-white rounded-lg hover:from-blue-700 hover:to-blue-800 transition-all font-medium shadow-lg disabled:opacity-50">{saving ? 'Menyimpan...' : 'Simpan Nilai'}</button>
-                <button onClick={() => { setSelectedMK(null); setNilaiMK(''); setShowResult(false); }} disabled={saving} className="px-6 py-3 bg-gray-200 text-gray-700 rounded-lg hover:bg-gray-300 transition-colors font-medium disabled:opacity-50">Batal</button>
-              </div>
+      <form
+        className="space-y-5 p-4"
+        onSubmit={(e) => {
+          e.preventDefault();
+          save();
+        }}
+        noValidate
+      >
+        <div className="flex flex-wrap items-end gap-4">
+          <Field
+            label="Nilai akhir (0–100)"
+            htmlFor="nilai"
+            error={showError ? error : null}
+            hint={current !== undefined ? `Nilai tersimpan saat ini ${fmt1(current)}.` : 'Belum ada nilai tersimpan.'}
+            className="w-44"
+          >
+            <input
+              id="nilai"
+              inputMode="decimal"
+              autoComplete="off"
+              autoFocus
+              value={raw}
+              onChange={(e) => {
+                setRaw(e.target.value);
+                setSaved(null);
+              }}
+              onBlur={() => setTouched(true)}
+              aria-invalid={showError ? true : undefined}
+              aria-describedby={showError ? 'nilai-error' : 'nilai-hint'}
+              placeholder="mis. 78,5"
+              className="control num h-10 text-[16px] font-semibold"
+            />
+          </Field>
+          {value !== null && !error && (
+            <div className="pb-7">
+              <StatusTag status={statusOf(value, thresholds)} />
             </div>
           )}
         </div>
-      )}
-    </div>
+
+        <div>
+          <h3 className="mb-2 text-[13.5px] font-semibold">Rincian per CPMK</h3>
+          {cpmk === null ? (
+            <Skeleton className="h-24 w-full" />
+          ) : cpmk.length === 0 ? (
+            <p className="text-[13px] text-ink-600">Mata kuliah ini belum memiliki CPMK; nilai hanya tercatat sebagai nilai MK.</p>
+          ) : (
+            <div className="overflow-x-auto rounded-md border border-line">
+              <table className="data-table">
+                <thead>
+                  <tr>
+                    <th scope="col">CPMK</th>
+                    <th scope="col" className="w-[64px] text-right">
+                      Bobot
+                    </th>
+                    <th scope="col" className="w-[64px] text-right">
+                      Poin
+                    </th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {rows.map((c) => (
+                    <tr key={c.id}>
+                      <td>
+                        <span className="code">{c.kode_cpmk}</span>
+                        <span className="mt-0.5 block text-[12.5px] text-ink-600">{c.deskripsi}</span>
+                      </td>
+                      <td className="num text-right">{Math.round(c.w * 100)}%</td>
+                      <td className="num text-right font-medium">{fmt2(c.poin)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+                <tfoot>
+                  <tr>
+                    <td>Nilai mata kuliah</td>
+                    <td className="num text-right">100%</td>
+                    <td className="num text-right">{fmt2(value)}</td>
+                  </tr>
+                </tfoot>
+              </table>
+            </div>
+          )}
+          <p className="mt-2 text-[12.5px] text-ink-500">
+            Poin = nilai × bobot CPMK.{weightsGuessed && ' Sebagian bobot belum ditentukan, jadi dibagi rata.'}
+            {mk.cpl_terkait && mk.cpl_terkait.length > 0 && ` Nilai ini ikut membentuk ${mk.cpl_terkait.join(', ')} semester ${semester}.`}
+          </p>
+        </div>
+
+        {saveError && <Notice tone="error" title="Nilai belum tersimpan">{saveError}</Notice>}
+        {saved && (
+          <Notice
+            tone="success"
+            title={`${saved.replaced ? 'Nilai diperbarui' : 'Nilai tersimpan'}: ${saved.mk} untuk ${saved.nama} = ${fmt1(saved.nilai)}`}
+            action={
+              <Link href="/dashboard" className="text-[13px] font-medium underline underline-offset-2">
+                Lihat profil
+              </Link>
+            }
+          >
+            Nilai CPL semester {semester} dihitung ulang · tahun ajaran {tahunAjaran}.
+          </Notice>
+        )}
+
+        <div className="flex items-center gap-3 border-t border-line pt-4">
+          <button type="submit" className="btn btn-primary" disabled={saving || value === null || !!error || unchanged}>
+            {saving && <Loader2 className="animate-spin" aria-hidden />}
+            {saving ? 'Menyimpan…' : current !== undefined ? 'Perbarui nilai' : 'Simpan nilai'}
+          </button>
+          {unchanged && !saved && <span className="text-[12.5px] text-ink-500">Sama dengan nilai tersimpan.</span>}
+        </div>
+      </form>
+    </section>
   );
 }

@@ -1,16 +1,5 @@
-import Sidebar from '@/components/Sidebar';
+import AppShell from '@/components/sim/AppShell';
 
-export default function DashboardLayout({
-  children,
-}: {
-  children: React.ReactNode;
-}) {
-  return (
-    <div className="flex min-h-screen bg-gray-50">
-      <Sidebar />
-      <main className="flex-1 lg:ml-64 transition-all duration-300">
-        {children}
-      </main>
-    </div>
-  );
+export default function DashboardLayout({ children }: { children: React.ReactNode }) {
+  return <AppShell>{children}</AppShell>;
 }

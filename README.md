@@ -242,6 +242,37 @@ npm run dev
 # Navigate to http://localhost:3000
 ```
 
+### Menjalankan tanpa backend (data contoh)
+
+`mock-server.cjs` menyajikan seluruh endpoint yang dipakai frontend di port 8001 dengan data contoh:
+kurikulum INF (semester 1–4) dan ARS (semester 1–2) dari `MK_CODES.md`, serta nilai dari `Data-Example/*.csv`.
+Nilai CPL dihitung dengan rumus yang sama dengan backend Go (`internal/service/cpl_service.go`).
+
+```bash
+# .env.local
+NEXT_PUBLIC_API_URL=http://localhost:8001/api
+NEXT_PUBLIC_DEMO=1        # menampilkan penanda "Data contoh" di antarmuka
+
+# terminal 1
+npm run mock
+
+# terminal 2
+npm run dev
+```
+
+Masuk dengan `kaprodi` / `kaprodi123`. Nilai yang diinput atau diimpor hanya tersimpan di memori
+server mock dan hilang saat server dimatikan.
+
+### Antarmuka
+
+| Halaman | Isi |
+|---|---|
+| Ringkasan | Profil CPL mahasiswa per semester (jaring laba-laba + daftar CPL); pilih satu CPL untuk menelusuri MK dan CPMK penyumbangnya |
+| Input Nilai | Nilai akhir satu MK untuk satu mahasiswa, dengan rincian poin per CPMK |
+| Laporan | Per mahasiswa, per semester, per prodi; unduh PDF (dengan blok pengesahan) atau Excel |
+| Data & Import | Impor Excel/CSV dengan pratinjau dan validasi per sel, daftar mahasiswa, kurikulum (MK → CPMK) |
+| Pengaturan | Batas status tercapai/cukup (berlaku di semua halaman), tahun ajaran, nama penandatangan |
+
 ### Build for Production
 
 ```bash

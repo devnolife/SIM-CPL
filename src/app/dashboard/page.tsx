@@ -1,609 +1,477 @@
 'use client';
 
-import { useState, useEffect } from 'react';
-import { useRouter } from 'next/navigation';
+import { useEffect, useMemo, useState } from 'react';
+import Link from 'next/link';
+import { ArrowRight, ChevronRight } from 'lucide-react';
 import {
+  errorMessage,
+  fetchAnalisisMK,
+  fetchCPLMapping,
+  fetchCPMKByMK,
+  fetchMahasiswaSummary,
   fetchNilaiCPLByMahasiswa,
+  type AnalisisMK,
+  type CPLMappingItem,
+  type CPMKMaster,
+  type MahasiswaSummary,
 } from '@/lib/simcplApi';
+import { useThresholds } from '@/lib/config';
+import { fmt1, mean, sortByKode } from '@/lib/format';
+import { statusOf, rangeLabel, type CplStatus } from '@/lib/status';
+import { useProdi } from '@/components/sim/useProdi';
+import { StudentPicker } from '@/components/sim/StudentPicker';
+import { RadarProfile } from '@/components/sim/RadarProfile';
 import {
-  ResponsiveContainer,
-  RadarChart,
-  PolarGrid,
-  PolarAngleAxis,
-  PolarRadiusAxis,
-  Radar,
-  Tooltip,
-  BarChart,
-  Bar,
-  XAxis,
-  YAxis,
-  CartesianGrid,
-  ReferenceLine,
-  LabelList,
-  Cell
-} from 'recharts';
+  EmptyState,
+  Field,
+  Notice,
+  PageHeader,
+  ScoreBar,
+  SEMESTERS,
+  Select,
+  Skeleton,
+  StatusTag,
+} from '@/components/sim/ui';
+import { cn } from '@/lib/utils';
 
-// ============================ API CONFIG ============================
-const API_BASE =   process.env.NEXT_PUBLIC_API_URL
- ?? 'https://jf03bcfk-8001.asse.devtunnels.ms/api';
+type CplRow = { kode: string; deskripsi: string; nilai: number | null; mkCount: number; mapping: CPLMappingItem };
 
-// ============================ TYPES ============================
-type Prodi = {
-  id_prodi: number;
-  kode_prodi: string;
-  nama_prodi: string;
-};
+export default function RingkasanPage() {
+  const thresholds = useThresholds();
+  const prodi = useProdi();
+  const [semester, setSemester] = useState(1);
 
-type MahasiswaRow = {
-  id: string;      
-  npm: string;     
-  nama: string;
-  angkatan?: number | null;
-  source: 'db' | 'Mock';
-};
+  const [students, setStudents] = useState<MahasiswaSummary[]>([]);
+  const [loadingStudents, setLoadingStudents] = useState(false);
+  const [nim, setNim] = useState<string | null>(null);
 
-type CplScore = {
-  kode: string;
-  nilai: number;
-  status: 'Tercapai' | 'Cukup' | 'Belum Tercapai';
-};
+  const [mapping, setMapping] = useState<CPLMappingItem[]>([]);
+  const [scores, setScores] = useState<Record<string, number>>({});
+  const [loadingProfile, setLoadingProfile] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  // Pilihan pengguna hanya berlaku untuk konteks (prodi, semester, mahasiswa) saat ia memilih.
+  const [picked, setPicked] = useState<{ ctx: string; kode: string } | null>(null);
 
-type CPMKItem = {
-  id: string; 
-  kode_cpmk: string;
-  deskripsi: string;
-  bobot: number | null; 
-};
+  const idProdi = prodi.selected?.id_prodi ?? null;
 
-type MappingNode = {
-  cpl: {
-    kode: string;
-    deskripsi: string;
-  };
-  mkCount: number;
-  mataKuliah: {
-    id_mk: string; 
-    kode: string;
-    nama: string;
-    sks: number;
-    cpmkCount: number;
-    relatedCpmks: string[];
-  }[];
-  totalCPMK: number;
-};
-
-// ============================ KOMPONEN UTAMA ============================
-
-export default function DashboardPage() {
-  const router = useRouter();
-
-  // ---------- state filter ----------
-  const [prodiList, setProdiList] = useState<Prodi[]>([]);
-  const [selectedProdi, setSelectedProdi] = useState<string>(''); 
-  const [selectedSemester, setSelectedSemester] = useState<number>(1);
-  const [selectedMahasiswa, setSelectedMahasiswa] = useState<string>('');
-
-  // ---------- state data ----------
-  const [filteredMahasiswa, setFilteredMahasiswa] = useState<MahasiswaRow[]>([]);
-  const [cplScores, setCplScores] = useState<CplScore[]>([]);
-  const [mappingData, setMappingData] = useState<MappingNode[]>([]);
-  
-  // ---------- state misc ----------
-  const [refreshKey, setRefreshKey] = useState(0);
-  const [loadingMahasiswa, setLoadingMahasiswa] = useState(false);
-  const [loadingCPL, setLoadingCPL] = useState(false);
-
-  // ---------- state for MK Accordion (CPMK) ----------
-  const [expandedMKIds, setExpandedMKIds] = useState<string[]>([]);
-  const [cpmkByMK, setCpmkByMK] = useState<Record<string, CPMKItem[]>>({});
-  const [loadingCPMKFor, setLoadingCPMKFor] = useState<string | null>(null);
-  const [mhsCpmkScores, setMhsCpmkScores] = useState<Record<string, any[]>>({});
-  const [activeMKId, setActiveMKId] = useState<string | null>(null);
-
-  // ============================ HELPER: FORMAT BOBOT ============================
-  const formatBobot = (bobot: number | null | undefined) => {
-    let weight = bobot ?? 0;
-    // Jika backend kirim desimal (0.2), jadikan persen (20)
-    if (weight <= 1 && weight > 0) weight = weight * 100;
-    return Math.round(weight);
-  };
-
-  // ============================ FETCH PRODI ============================
+  // Mahasiswa yang punya nilai di semester ini.
   useEffect(() => {
-    async function loadProdi() {
-      try {
-        const res = await fetch(`${API_BASE}/prodi`);
-        if (!res.ok) throw new Error(`Gagal load prodi`);
-        const data: Prodi[] = await res.json();
-        setProdiList(data);
-        if (data.length > 0 && !selectedProdi) setSelectedProdi(data[0].kode_prodi);
-      } catch (err) {
-        console.error('Error prodi:', err);
-      }
-    }
-    loadProdi();
-  }, []);
-
-  // ============================ FETCH MAHASISWA ============================
-  useEffect(() => {
-    if (!selectedProdi) return;
-    async function loadMahasiswa() {
-      try {
-        setLoadingMahasiswa(true);
-        const prodiObj = prodiList.find(p => p.kode_prodi === selectedProdi);
-        if (!prodiObj) return;
-
-        const res = await fetch(`${API_BASE}/prodi/${prodiObj.id_prodi}/mahasiswa-nilai?semester=${selectedSemester}`);
-        const rows = await res.json();
-        const list: MahasiswaRow[] = Array.isArray(rows) ? rows.map((r: any) => ({
-          id: String(r.id_mhs),
-          npm: r.nim,
-          nama: r.nama,
-          angkatan: r.angkatan,
-          source: 'db',
-        })) : [];
-        
-        setFilteredMahasiswa(list);
-        if (list.length > 0) setSelectedMahasiswa(list[0].id);
-        else setSelectedMahasiswa('');
-      } catch (err) {
-        console.error(err);
-        setFilteredMahasiswa([]);
-      } finally {
-        setLoadingMahasiswa(false);
-      }
-    }
-    loadMahasiswa();
-  }, [selectedProdi, selectedSemester, refreshKey, prodiList]);
-
-  // ============================ FETCH CPL & MAPPING ============================
-  useEffect(() => {
-    const prodiObj = prodiList.find(p => p.kode_prodi === selectedProdi);
-    if (!prodiObj) {
-      setMappingData([]);
-      return;
-    }
-
-    setMappingData([]);
-    setCplScores([]);
-    setExpandedMKIds([]);
-
-    async function loadCPLData() {
-      try {
-        setLoadingCPL(true);
-        const mappingRes = await fetch(`${API_BASE}/prodi/${prodiObj?.id_prodi}/cpl-mapping?semester=${selectedSemester}`);
-        const mappingBackend = await mappingRes.json();
-
-        let scores: CplScore[] = [];
-        if (selectedMahasiswa) {
-          const mhs = filteredMahasiswa.find(m => m.id === selectedMahasiswa);
-          if (mhs) {
-            const res = await fetchNilaiCPLByMahasiswa(mhs.npm, selectedSemester);
-            scores = (res.cpl || []).map((row: any) => ({
-              kode: row.kode_cpl,
-              nilai: row.nilai_angka,
-              status: row.nilai_angka >= 70 ? 'Tercapai' : row.nilai_angka >= 50 ? 'Cukup' : 'Belum Tercapai'
-            }));
-          }
+    if (!idProdi) return;
+    const ctrl = new AbortController();
+    setLoadingStudents(true);
+    fetchMahasiswaSummary(idProdi, { semester, signal: ctrl.signal })
+      .then((list) => {
+        setStudents(list);
+        setNim((cur) => (cur && list.some((s) => s.nim === cur) ? cur : list[0]?.nim ?? null));
+      })
+      .catch((err) => {
+        if (err.name !== 'AbortError') {
+          setStudents([]);
+          setNim(null);
+          setError(errorMessage(err));
         }
+      })
+      .finally(() => setLoadingStudents(false));
+    return () => ctrl.abort();
+  }, [idProdi, semester]);
 
-        const finalMapping: MappingNode[] = Array.isArray(mappingBackend) ? mappingBackend.map((b: any) => ({
-          cpl: { kode: b.kode_cpl, deskripsi: b.deskripsi },
-          mkCount: b.mk_list?.length || 0,
-          mataKuliah: (b.mk_list || []).map((m: any) => ({
-            id_mk: m.id_mk,
-            kode: m.kode_mk,
-            nama: m.nama_mk,
-            sks: m.sks,
-            cpmkCount: m.cpmk_count,
-            relatedCpmks: m.relasi ? m.relasi.split(', ') : [],
-          })),
-          totalCPMK: (b.mk_list || []).reduce((acc: number, m: any) => acc + m.cpmk_count, 0)
-        })) : [];
+  // Pemetaan CPL → MK semester ini + nilai CPL mahasiswa.
+  useEffect(() => {
+    if (!idProdi) return;
+    const ctrl = new AbortController();
+    setLoadingProfile(true);
+    setError(null);
+    Promise.all([
+      fetchCPLMapping(idProdi, semester, ctrl.signal),
+      nim ? fetchNilaiCPLByMahasiswa(nim, semester, ctrl.signal) : Promise.resolve(null),
+    ])
+      .then(([map, cpl]) => {
+        setMapping(sortByKode(map, (m) => m.kode_cpl));
+        const next: Record<string, number> = {};
+        cpl?.cpl.forEach((c) => (next[c.kode_cpl] = c.nilai_angka));
+        setScores(next);
+      })
+      .catch((err) => {
+        if (err.name !== 'AbortError') setError(errorMessage(err));
+      })
+      .finally(() => setLoadingProfile(false));
+    return () => ctrl.abort();
+  }, [idProdi, semester, nim]);
 
-        setMappingData(finalMapping);
-        setCplScores(scores);
-      } catch (err) {
-        console.error(err);
-      } finally {
-        setLoadingCPL(false);
-      }
-    }
-    loadCPLData();
-  }, [selectedProdi, selectedMahasiswa, selectedSemester, refreshKey, prodiList, filteredMahasiswa]);
+  const rows: CplRow[] = useMemo(
+    () =>
+      mapping.map((m) => ({
+        kode: m.kode_cpl,
+        deskripsi: m.deskripsi,
+        nilai: scores[m.kode_cpl] ?? null,
+        mkCount: m.mk_list.length,
+        mapping: m,
+      })),
+    [mapping, scores],
+  );
 
-  // ============================ TOGGLE MK & FETCH CPMK ============================
-  const toggleMKAccordion = async (idMK: string) => {
-    if (expandedMKIds.includes(idMK)) {
-      setExpandedMKIds(prev => prev.filter(id => id !== idMK));
-      if (activeMKId === idMK) setActiveMKId(null);
-    } else {
-      setExpandedMKIds(prev => [...prev, idMK]);
-      setActiveMKId(idMK);
-    }
+  const measured = rows.filter((r) => r.nilai !== null);
+  const counts = useMemo(() => {
+    const c: Record<CplStatus, number> = { tercapai: 0, cukup: 0, belum: 0, kosong: 0 };
+    rows.forEach((r) => c[statusOf(r.nilai, thresholds)]++);
+    return c;
+  }, [rows, thresholds]);
 
-    // 1. Fetch Master CPMK (untuk Bobot)
-    if (!cpmkByMK[idMK]) {
-      setLoadingCPMKFor(idMK);
-      try {
-        const res = await fetch(`${API_BASE}/mk/${idMK}/cpmk`);
-        const data = await res.json();
-        // Simpan data master
-        setCpmkByMK(prev => ({ ...prev, [idMK]: Array.isArray(data) ? data : [] }));
-      } catch (err) { console.error(err); } 
-      finally { setLoadingCPMKFor(null); }
-    }
+  // CPL terpilih: pilihan pengguna, atau CPL terukur dengan nilai terendah (yang paling perlu dibaca).
+  const ctx = `${idProdi}|${semester}|${nim}`;
+  const autoCpl = useMemo(() => {
+    const lowest = rows.filter((r) => r.nilai !== null).sort((a, b) => (a.nilai ?? 0) - (b.nilai ?? 0))[0];
+    return (lowest ?? rows[0])?.kode ?? null;
+  }, [rows]);
+  const selectedCpl = picked && picked.ctx === ctx && rows.some((r) => r.kode === picked.kode) ? picked.kode : autoCpl;
+  const setSelectedCpl = (kode: string) => setPicked({ ctx, kode });
 
-    // 2. Fetch Nilai Mahasiswa
-    if (selectedMahasiswa && !mhsCpmkScores[idMK]) {
-      const mhs = filteredMahasiswa.find(m => m.id === selectedMahasiswa);
-      if (mhs) {
-        try {
-          const res = await fetch(`${API_BASE}/mahasiswa/${mhs.npm}/mk/${idMK}/analisis`);
-          const data = await res.json();
-          const analisisArray = Array.isArray(data) ? data : (data.cpmk_analisis || []); 
-          setMhsCpmkScores(prev => ({ ...prev, [idMK]: analisisArray }));
-        } catch (err) { console.error(err); }
-      }
-    }
-  };
-
-  // ============================ DERIVED DATA ============================
-  const selectedMhs = filteredMahasiswa.find(m => m.id === selectedMahasiswa);
-  const prodiInfo = prodiList.find(p => p.kode_prodi === selectedProdi);
-  
-  const radarData = mappingData.map(m => {
-    const s = cplScores.find(sc => sc.kode === m.cpl.kode);
-    return { subject: m.cpl.kode, value: s?.nilai || 0, fullMark: 100 };
-  });
-
-  // [LOGIKA BARU] Persiapkan data Chart CPMK dengan menggabungkan Nilai & Master Bobot
-  const chartCPMKData = activeMKId ? (mhsCpmkScores[activeMKId] || []).map(scoreData => {
-    // Cari Master CPMK untuk mendapatkan Bobot Asli jika di scoreData 0/null
-    const masterCPMK = (cpmkByMK[activeMKId] || []).find(
-      m => m.kode_cpmk === scoreData.kode_cpmk || String(m.id) === String(scoreData.id_cpmk)
-    );
-
-    // Prioritas Bobot: Dari data nilai -> Dari master data -> 0
-    const rawBobot = scoreData.bobot || masterCPMK?.bobot;
-    const bobot = formatBobot(rawBobot);
-    
-    const nilaiAsli = scoreData.nilai || 0; // Skala 0-100
-    const nilaiKontribusi = (nilaiAsli * bobot) / 100; // Skala 0-Bobot
-
-    return {
-      ...scoreData,
-      bobotReal: bobot,
-      nilaiKontribusi: Number(nilaiKontribusi.toFixed(1)),
-      // Penanda warna bar (jika nilai asli < 50 merah, dsb)
-      fillColor: nilaiAsli >= 70 ? '#3b82f6' : nilaiAsli >= 50 ? '#f59e0b' : '#ef4444' 
-    };
-  }) : [];
+  const student = students.find((s) => s.nim === nim) ?? null;
+  const selectedRow = rows.find((r) => r.kode === selectedCpl) ?? null;
+  const avg = mean(measured.map((r) => r.nilai as number));
+  const noMapping = !loadingProfile && rows.length > 0 && rows.every((r) => r.mkCount === 0);
 
   return (
-    <div className="min-h-screen bg-[#f8faff] p-6">
-      {/* 1. FILTER HEADER */}
-      <div className="bg-white rounded-xl shadow-sm border border-gray-100 p-6 mb-6">
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-          <div>
-            <label className="flex items-center text-sm font-semibold text-blue-800 mb-2">
-              <span className="mr-2"></span> Pilih Program Studi
-            </label>
-            <select
-              value={selectedProdi}
-              onChange={(e) => { setSelectedProdi(e.target.value); setSelectedMahasiswa(''); }}
-              className="w-full p-3 border-2 border-blue-50 rounded-xl focus:ring-2 focus:ring-blue-500 outline-none"
-            >
-              {prodiList.map(p => <option key={p.id_prodi} value={p.kode_prodi}>{p.nama_prodi}</option>)}
-            </select>
-          </div>
-          <div>
-            <label className="flex items-center text-sm font-semibold text-blue-800 mb-2">
-              <span className="mr-2"></span> Pilih Semester
-            </label>
-            <select
-              value={selectedSemester}
-              onChange={(e) => setSelectedSemester(Number(e.target.value))}
-              className="w-full p-3 border-2 border-blue-50 rounded-xl focus:ring-2 focus:ring-blue-500 outline-none"
-            >
-              {[1, 2, 3, 4, 5, 6, 7, 8].map(s => <option key={s} value={s}>Semester {s}</option>)}
-            </select>
-          </div>
-          <div>
-            <label className="flex items-center text-sm font-semibold text-blue-800 mb-2">
-              <span className="mr-2"></span> Pilih Mahasiswa
-            </label>
-            <select
-              value={selectedMahasiswa}
-              onChange={(e) => setSelectedMahasiswa(e.target.value)}
-              className="w-full p-3 border-2 border-blue-50 rounded-xl focus:ring-2 focus:ring-blue-500 outline-none"
-              disabled={filteredMahasiswa.length === 0}
-            >
-              {filteredMahasiswa.map(m => <option key={m.id} value={m.id}>{m.npm} - {m.nama}</option>)}
-              {filteredMahasiswa.length === 0 && <option value="">Tidak ada mahasiswa</option>}
-            </select>
-          </div>
-        </div>
+    <>
+      <PageHeader
+        title={student ? student.nama : 'Profil capaian CPL'}
+        description={
+          student
+            ? `NIM ${student.nim}${student.angkatan ? ` · angkatan ${student.angkatan}` : ''} · ${student.jumlah_mk} mata kuliah dinilai di semester ${semester}`
+            : 'Pilih mahasiswa untuk melihat capaian setiap CPL dan mata kuliah yang menyumbangnya.'
+        }
+      />
 
-        {selectedMhs && (
-          <div className="mt-6 p-6 bg-blue-50/50 rounded-2xl border border-blue-100">
-            <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
-              <div><p className="text-gray-500 font-medium">Prodi:</p><p className="font-bold text-blue-700">{prodiInfo?.nama_prodi}</p></div>
-              <div><p className="text-gray-500 font-medium">NIM:</p><p className="font-bold text-blue-700">{selectedMhs.npm}</p></div>
-              <div><p className="text-gray-500 font-medium">Angkatan:</p><p className="font-bold text-blue-700">{selectedMhs.angkatan}</p></div>
-              <div><p className="text-gray-500 font-medium">Source:</p><div className="flex items-center"><span className="mr-1"></span><span className="font-bold text-gray-700">Database</span></div></div>
-            </div>
-          </div>
-        )}
+      <div className="sheet mb-6 grid grid-cols-1 gap-4 p-4 sm:grid-cols-2 lg:grid-cols-[1fr_200px_1.4fr]">
+        <Field label="Program studi" htmlFor="f-prodi">
+          <Select
+            id="f-prodi"
+            value={idProdi ?? ''}
+            disabled={prodi.loading}
+            onChange={(v) => {
+              prodi.setSelectedId(Number(v));
+              // Data mahasiswa milik prodi lama tidak boleh tampil di bawah prodi baru.
+              setNim(null);
+              setStudents([]);
+              setScores({});
+            }}
+          >
+            {prodi.list.map((p) => (
+              <option key={p.id_prodi} value={p.id_prodi}>
+                {p.nama_prodi}
+              </option>
+            ))}
+          </Select>
+        </Field>
+        <Field label="Semester" htmlFor="f-semester">
+          <Select id="f-semester" value={semester} onChange={(v) => setSemester(Number(v))}>
+            {SEMESTERS.map((s) => (
+              <option key={s} value={s}>
+                Semester {s}
+              </option>
+            ))}
+          </Select>
+        </Field>
+        <Field label="Mahasiswa" htmlFor="f-mhs" className="sm:col-span-2 lg:col-span-1">
+          <StudentPicker id="f-mhs" students={students} value={nim} onChange={setNim} loading={loadingStudents} />
+        </Field>
       </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
-        {/* 3. HUBUNGAN CPL-MK-CPMK (TIMELINE) */}
-        <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-6">
-          <div className="flex items-center mb-1">
-            <div className="w-4 h-4 rounded-full bg-blue-100 mr-2" />
-            <h3 className="text-lg font-bold text-gray-800">Hubungan (CPL - MK - CPMK)</h3>
-          </div>
-          <p className="text-sm text-gray-500 mb-6">Semester {selectedSemester} • {prodiInfo?.nama_prodi}</p>
+      {(prodi.error || error) && (
+        <Notice tone="error" title="Data tidak dapat dimuat" className="mb-6">
+          {prodi.error || error}
+        </Notice>
+      )}
 
-          <div className="space-y-6 overflow-y-auto max-h-[910px] pr-2">
-            {mappingData.map((item) => {
-              const isMissingData = item.mkCount === 0;
+      {noMapping ? (
+        <EmptyState
+          title={`Belum ada mata kuliah semester ${semester} yang dipetakan ke CPL`}
+          action={
+            <Link href="/dashboard/manajemen" className="btn btn-secondary">
+              Buka Data &amp; Import <ArrowRight aria-hidden />
+            </Link>
+          }
+        >
+          Tambahkan mata kuliah dan pemetaan CPL untuk {prodi.selected?.nama_prodi ?? 'prodi ini'}, atau pilih semester lain.
+        </EmptyState>
+      ) : !loadingStudents && students.length === 0 && !error ? (
+        <EmptyState
+          title={`Belum ada nilai mahasiswa di semester ${semester}`}
+          action={
+            <Link href="/dashboard/input-nilai" className="btn btn-secondary">
+              Input nilai <ArrowRight aria-hidden />
+            </Link>
+          }
+        >
+          Nilai dapat dimasukkan satu per satu atau diimpor dari file Excel di halaman Data &amp; Import.
+        </EmptyState>
+      ) : (
+        <>
+          {/* Profil: jaring laba-laba + daftar CPL */}
+          <section
+            aria-labelledby="h-profil"
+            aria-busy={loadingProfile}
+            className={cn('sheet mb-6 overflow-hidden transition-opacity', loadingProfile && rows.length > 0 && 'opacity-60')}
+          >
+            <div className="flex flex-wrap items-baseline justify-between gap-x-6 gap-y-2 border-b border-line px-4 py-3 sm:px-5">
+              <h2 id="h-profil" className="text-[15px] font-semibold">
+                Profil CPL
+              </h2>
+              <p className="num flex flex-wrap gap-x-4 gap-y-1 text-[13px] text-ink-600">
+                <span>
+                  Rata-rata <span className="font-semibold text-ink-900">{fmt1(avg)}</span>
+                </span>
+                <span>
+                  {counts.tercapai} tercapai · {counts.cukup} cukup · {counts.belum} belum
+                  {counts.kosong > 0 && ` · ${counts.kosong} tanpa nilai`}
+                </span>
+              </p>
+            </div>
+
+            <div className="grid grid-cols-1 lg:grid-cols-[minmax(0,5fr)_minmax(0,6fr)]">
+              <div className="flex flex-col justify-center border-b border-line p-4 lg:border-b-0 lg:border-r">
+                {loadingProfile && rows.length === 0 ? (
+                  <Skeleton className="mx-auto aspect-square w-full max-w-[300px] rounded-full" />
+                ) : measured.length < 3 ? (
+                  <p className="mx-auto max-w-[36ch] py-16 text-center text-[13.5px] text-ink-500">
+                    Profil digambar bila minimal 3 CPL sudah bernilai. Semester ini baru {measured.length} CPL yang bernilai.
+                  </p>
+                ) : (
+                  <RadarProfile
+                    points={measured.map((r) => ({ kode: r.kode, nilai: r.nilai, deskripsi: r.deskripsi }))}
+                    thresholds={thresholds}
+                    selected={selectedCpl}
+                    onSelect={setSelectedCpl}
+                    className="h-[270px] sm:h-[340px]"
+                  />
+                )}
+                <p className="mt-1 flex flex-wrap items-center justify-center gap-x-4 gap-y-1 text-[12px] text-ink-500">
+                  <span className="flex items-center gap-1.5">
+                    <span className="inline-block h-0 w-4 border-t border-dashed border-ink-700" aria-hidden />
+                    Batas tercapai {thresholds.tercapai}
+                  </span>
+                  {counts.kosong > 0 && measured.length >= 3 && (
+                    <span>
+                      {rows
+                        .filter((r) => r.nilai === null)
+                        .map((r) => r.kode)
+                        .join(', ')}{' '}
+                      tidak digambar (belum bernilai)
+                    </span>
+                  )}
+                </p>
+              </div>
+
+              <ul aria-label="Daftar CPL" className="divide-y divide-line">
+                {loadingProfile && rows.length === 0
+                  ? Array.from({ length: 8 }).map((_, i) => (
+                      <li key={i} className="px-4 py-3">
+                        <Skeleton className="h-4 w-2/3" />
+                      </li>
+                    ))
+                  : rows.map((r) => {
+                      const status = statusOf(r.nilai, thresholds);
+                      const active = r.kode === selectedCpl;
+                      return (
+                        <li key={r.kode}>
+                          <button
+                            type="button"
+                            onClick={() => setSelectedCpl(r.kode)}
+                            aria-pressed={active}
+                            className={cn(
+                              'grid w-full grid-cols-[52px_minmax(0,1fr)_auto] items-center gap-x-3 gap-y-1.5 px-4 py-2.5 text-left transition-colors sm:grid-cols-[56px_minmax(0,1fr)_120px_52px]',
+                              active ? 'bg-brand-soft/60' : 'hover:bg-ink-50',
+                            )}
+                          >
+                            <span className={cn('code col-start-1 row-start-1', active && 'font-semibold text-ink-950')}>{r.kode}</span>
+                            <span className="col-start-2 row-start-1 min-w-0">
+                              <span className="block truncate text-[13.5px] text-ink-800">{r.deskripsi}</span>
+                              <span className="text-[12px] text-ink-500">
+                                {r.mkCount === 0 ? 'Tidak ada MK di semester ini' : `${r.mkCount} MK menyumbang`}
+                              </span>
+                            </span>
+                            <ScoreBar
+                              value={r.nilai}
+                              thresholds={thresholds}
+                              className="col-span-3 col-start-1 row-start-2 sm:col-span-1 sm:col-start-3 sm:row-start-1"
+                            />
+                            <span
+                              className={cn(
+                                'num col-start-3 row-start-1 text-right text-[14px] font-semibold sm:col-start-4',
+                                status === 'kosong' ? 'text-ink-500' : 'text-ink-900',
+                              )}
+                            >
+                              {fmt1(r.nilai)}
+                            </span>
+                          </button>
+                        </li>
+                      );
+                    })}
+              </ul>
+            </div>
+          </section>
+
+          {selectedRow && nim && (
+            <CplTrace key={`${selectedRow.kode}-${nim}-${semester}`} row={selectedRow} nim={nim} semester={semester} />
+          )}
+        </>
+      )}
+    </>
+  );
+}
+
+/* ── Penelusuran satu CPL: MK penyumbang → CPMK ────────────────────────── */
+
+type MkDetail = { cpmk: CPMKMaster[]; analisis: AnalisisMK | null };
+
+function CplTrace({ row, nim, semester }: { row: CplRow; nim: string; semester: number }) {
+  const thresholds = useThresholds();
+  const [details, setDetails] = useState<Record<string, MkDetail>>({});
+  const [loading, setLoading] = useState(true);
+  const [failed, setFailed] = useState(false);
+  const [open, setOpen] = useState<string | null>(null);
+
+  const mkList = row.mapping.mk_list;
+  useEffect(() => {
+    if (mkList.length === 0) {
+      setLoading(false);
+      return;
+    }
+    const ctrl = new AbortController();
+    Promise.all(
+      mkList.map(async (mk) => {
+        const [cpmk, analisis] = await Promise.all([
+          fetchCPMKByMK(mk.id_mk, ctrl.signal),
+          fetchAnalisisMK(nim, mk.id_mk, ctrl.signal).catch(() => null),
+        ]);
+        return [mk.id_mk, { cpmk, analisis }] as const;
+      }),
+    )
+      .then((entries) => setDetails(Object.fromEntries(entries)))
+      .catch((err) => {
+        if (err.name !== 'AbortError') setFailed(true);
+      })
+      .finally(() => setLoading(false));
+    return () => ctrl.abort();
+  }, [mkList, nim]);
+
+  const status = statusOf(row.nilai, thresholds);
+  const mkCount = mkList.length;
+  const share = mkCount > 0 ? 1 / mkCount : 0;
+
+  return (
+    <section aria-labelledby="h-trace" className="sheet">
+      <header className="flex flex-col gap-3 border-b border-line px-4 py-4 sm:flex-row sm:items-start sm:justify-between sm:px-5">
+        <div className="min-w-0">
+          <h2 id="h-trace" className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[15px] font-semibold">
+            <span className="code text-[14px]">{row.kode}</span>
+            <StatusTag status={status} />
+          </h2>
+          <p className="mt-1 max-w-[70ch] text-[14px] text-ink-700">{row.deskripsi}</p>
+        </div>
+        <div className="shrink-0 sm:text-right">
+          <p className="num text-[28px] font-semibold leading-none tracking-tight">{fmt1(row.nilai)}</p>
+          <p className="mt-1 text-[12px] text-ink-500">
+            {status === 'kosong' ? 'belum ada nilai' : `rentang ${rangeLabel(status, thresholds)}`}
+          </p>
+        </div>
+      </header>
+
+      {mkCount === 0 ? (
+        <p className="px-5 py-6 text-[13.5px] text-ink-600">
+          Tidak ada mata kuliah semester {semester} yang menyumbang {row.kode}. Nilai CPL ini dibentuk di semester lain.
+        </p>
+      ) : (
+        <>
+          <p className="border-b border-line bg-ink-50/60 px-4 py-2.5 text-[12.5px] text-ink-600 sm:px-5">
+            Nilai {row.kode} = rata-rata nilai {mkCount} mata kuliah di bawah (bobot tiap MK 1/{mkCount}). Klik baris untuk melihat CPMK yang diukur.
+          </p>
+          <ul className="divide-y divide-line">
+            {mkList.map((mk) => {
+              const d = details[mk.id_mk];
+              const nilaiMk = d?.analisis?.nilai_mk ?? null;
+              const isOpen = open === mk.id_mk;
+              const relevant = new Set(mk.relasi);
               return (
-                <div key={item.cpl.kode} className="relative pl-6 border-l-2 border-blue-100">
-                  <div className={`absolute -left-[9px] top-0 w-4 h-4 rounded-full border-4 border-white shadow-sm ${isMissingData ? 'bg-red-500' : 'bg-blue-500'}`} />
-                  <div className={`text-white p-4 rounded-xl shadow-md mb-4 transition-colors ${isMissingData ? 'bg-red-500' : 'bg-blue-600'}`}>
-                    <div className="flex justify-between items-center mb-2">
-                      <span className="font-bold">{item.cpl.kode}</span>
-                      <div className="flex gap-2">
-                        <span className={`text-[10px] px-2 py-0.5 rounded-full ${isMissingData ? 'bg-white/30' : 'bg-white/20'}`}>{item.mkCount} MK</span>
-                        <span className={`text-[10px] px-2 py-0.5 rounded-full ${isMissingData ? 'bg-white/30' : 'bg-white/20'}`}>{item.totalCPMK} CPMK</span>
-                      </div>
-                    </div>
-                    <p className="text-xs leading-relaxed opacity-90">{item.cpl.deskripsi}</p>
-                    {isMissingData && <p className="text-[10px] mt-2 font-bold italic text-red-100">! CPL ini tidak memiliki Mata Kuliah di semester {selectedSemester}</p>}
-                  </div>
+                <li key={mk.id_mk}>
+                  <button
+                    type="button"
+                    onClick={() => setOpen(isOpen ? null : mk.id_mk)}
+                    aria-expanded={isOpen}
+                    className="grid w-full grid-cols-[16px_minmax(0,1fr)_auto] items-center gap-x-3 gap-y-1.5 px-4 py-3 text-left hover:bg-ink-50 sm:grid-cols-[16px_76px_minmax(0,1fr)_140px_60px_70px] sm:px-5"
+                  >
+                    <ChevronRight className={cn('col-start-1 row-start-1 size-4 text-ink-400 transition-transform', isOpen && 'rotate-90')} aria-hidden />
+                    <span className="code hidden sm:col-start-2 sm:row-start-1 sm:inline">{mk.kode_mk}</span>
+                    <span className="col-start-2 row-start-1 min-w-0 sm:col-start-3">
+                      <span className="code mr-2 sm:hidden">{mk.kode_mk}</span>
+                      <span className="text-[13.5px] text-ink-900">{mk.nama_mk}</span>
+                      <span className="block text-[12px] text-ink-500">
+                        {mk.sks} SKS · {mk.cpmk_count} CPMK untuk {row.kode}
+                      </span>
+                    </span>
+                    <span className="col-span-2 col-start-2 row-start-2 sm:col-span-1 sm:col-start-4 sm:row-start-1">
+                      {loading ? <Skeleton className="h-1.5 w-full" /> : <ScoreBar value={nilaiMk} thresholds={thresholds} />}
+                    </span>
+                    <span className="num col-start-3 row-start-1 text-right text-[14px] font-semibold sm:col-start-5">
+                      {loading ? '…' : fmt1(nilaiMk)}
+                    </span>
+                    <span className="num hidden text-right text-[12.5px] text-ink-500 sm:col-start-6 sm:row-start-1 sm:inline">
+                      bobot {Math.round(share * 100)}%
+                    </span>
+                  </button>
 
-                  <div className="space-y-3">
-                    {item.mataKuliah.map((mk) => (
-                      <div key={mk.id_mk} className="relative pl-6">
-                        <div className="absolute -left-[30px] top-5 w-3 h-3 rounded-full bg-gray-200 border-2 border-white" />
-                        <div 
-                          onClick={() => toggleMKAccordion(mk.id_mk)}
-                          className={`group p-4 rounded-xl border-2 transition-all cursor-pointer ${
-                            expandedMKIds.includes(mk.id_mk) ? 'bg-emerald-50 border-emerald-200' : 'bg-emerald-50/30 border-emerald-100 hover:border-emerald-200'
-                          }`}
-                        >
-                          <div className="flex justify-between items-start">
-                            <div className="flex items-center gap-2 mb-1">
-                              <span className="bg-emerald-500 text-white text-[10px] font-bold px-2 py-0.5 rounded uppercase">{mk.kode}</span>
-                              <h4 className="text-sm font-bold text-gray-800">{mk.nama}</h4>
-                            </div>
-                            {mk.cpmkCount > 0 && <span className={`text-[10px] transition-transform ${expandedMKIds.includes(mk.id_mk) ? 'rotate-180' : ''}`}>▼</span>}
-                          </div>
-                          
-                          {expandedMKIds.includes(mk.id_mk) && (
-                            <div className="mt-4 space-y-3">
-                              {(cpmkByMK[mk.id_mk] || []).map((cpmk) => {
-                                const isRelated = mk.relatedCpmks?.includes(cpmk.kode_cpmk);
-                                
-                                // === LOGIKA GABUNGAN (FALLBACK BOBOT) ===
-                                const scoreData = (mhsCpmkScores[mk.id_mk] || []).find(s => String(s.id_cpmk) === String(cpmk.id) || s.kode_cpmk === cpmk.kode_cpmk);
-                                
-                                // Ambil bobot dari Master jika di nilai kosong (fix 0.0/0 issue)
-                                const bobotCPMK = formatBobot(cpmk.bobot ?? scoreData?.bobot);
-                                
-                                const score = scoreData?.nilai || 0; 
-                                const nilaiKontribusi = (score * bobotCPMK) / 100;
-
-                                return (
-                                  <div key={cpmk.id} className={`p-3 rounded-lg border ${isRelated ? 'bg-white' : 'bg-gray-50 opacity-50'}`}>
-                                    <div className="flex justify-between items-center mb-1">
-                                      <span className="text-[10px] font-bold">{cpmk.kode_cpmk}</span>
-                                      
-                                      {/* Tampilkan Poin Kontribusi */}
-                                      {isRelated && (
-                                        <span className={`text-[10px] font-bold px-2 py-0.5 rounded ${score >= 70 ? 'bg-green-100 text-green-700' : 'bg-amber-100 text-amber-700'}`}>
-                                          Poin: {nilaiKontribusi.toFixed(1)} <span className="text-gray-400 font-normal">/ {bobotCPMK}</span>
-                                        </span>
-                                      )}
-                                    </div>
-                                    
-                                    {isRelated ? (
-                                      <div className="space-y-2">
-                                        <p className="text-[11px] text-gray-600 leading-normal">{cpmk.deskripsi}</p>
-                                        
-                                        <div className="pl-4 border-l-2 border-emerald-100 space-y-1.5 mt-2">
-                                          <p className="text-[9px] font-bold text-emerald-600/70 uppercase tracking-wider">Sub-CPMK & Indikator:</p>
-                                          
-                                          {scoreData?.sub_cpmks && scoreData.sub_cpmks.length > 0 ? (
-                                            scoreData.sub_cpmks.map((sub: any, sIdx: number) => {
-                                              return (
-                                                <div key={sIdx} className="flex justify-between items-center bg-emerald-50/50 p-2 rounded text-[10px] text-gray-600">
-                                                  <span className="flex-1">{sub.kode_sub_cpmk}. {sub.deskripsi}</span>
-                                                  {/* Hilangkan tampilan nilai Sub-CPMK, hanya deskripsi */}
-                                                </div>
-                                              );
-                                            })
-                                          ) : (
-                                            <div className="text-[10px] text-gray-400 italic">Belum ada data indikator.</div>
-                                          )}
-                                        </div>
-                                      </div>
-                                    ) : (
-                                      <div className="h-2" />
+                  {isOpen && (
+                    <div className="border-t border-line bg-ink-50/50 px-4 py-3 sm:pl-[52px] sm:pr-5">
+                      {failed || !d ? (
+                        <p className="text-[13px] text-ink-600">{loading ? 'Memuat CPMK…' : 'CPMK tidak dapat dimuat.'}</p>
+                      ) : d.cpmk.length === 0 ? (
+                        <p className="text-[13px] text-ink-600">Mata kuliah ini belum memiliki CPMK.</p>
+                      ) : (
+                        <table className="data-table overflow-hidden rounded-md border border-line bg-white">
+                          <thead>
+                            <tr>
+                              <th scope="col" className="w-[150px]">CPMK</th>
+                              <th scope="col">Kemampuan yang diukur</th>
+                              <th scope="col" className="w-[72px] text-right">Bobot</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {d.cpmk.map((c) => {
+                              const isRel = relevant.has(c.kode_cpmk);
+                              const subs = d.analisis?.cpmk.find((a) => a.kode_cpmk === c.kode_cpmk)?.sub_cpmks ?? [];
+                              return (
+                                <tr key={c.id} className={isRel ? '' : 'text-ink-500'}>
+                                  <td>
+                                    <span className={cn('code', !isRel && 'text-ink-500')}>{c.kode_cpmk}</span>
+                                    {!isRel && <span className="block text-[11.5px]">untuk CPL lain</span>}
+                                  </td>
+                                  <td>
+                                    <span className={isRel ? 'text-ink-800' : ''}>{c.deskripsi}</span>
+                                    {isRel && subs.length > 0 && (
+                                      <ul className="mt-1.5 space-y-0.5 text-[12.5px] text-ink-500">
+                                        {subs.map((s) => (
+                                          <li key={s.kode_sub_cpmk}>
+                                            <span className="code text-[11.5px] text-ink-500">{s.kode_sub_cpmk}</span> {s.deskripsi}
+                                          </li>
+                                        ))}
+                                      </ul>
                                     )}
-                                  </div>
-                                );
-                              })}
-                            </div>
-                          )}
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                </div>
+                                  </td>
+                                  <td className="num text-right">{c.bobot === null ? '—' : `${Math.round(c.bobot * 100)}%`}</td>
+                                </tr>
+                              );
+                            })}
+                          </tbody>
+                        </table>
+                      )}
+                    </div>
+                  )}
+                </li>
               );
             })}
-          </div>
-        </div>
-
-        {/* 4. RADAR CHART & ANALISIS CHART */}
-        <div className="space-y-6">
-          <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-6 flex flex-col items-center">
-            <h3 className="text-lg font-bold text-gray-800 self-start mb-4">Profil Visualisasi CPL</h3>
-            <div className="h-[280px] w-full">
-              <ResponsiveContainer width="100%" height="100%">
-                <RadarChart data={radarData}>
-                  <PolarGrid stroke="#e2e8f0" />
-                  <PolarAngleAxis dataKey="subject" tick={{ fill: '#64748b', fontSize: 10 }} />
-                  <PolarRadiusAxis domain={[0, 100]} axisLine={false} tick={false} />
-                  <Radar name="Skor CPL" dataKey="value" stroke="#3b82f6" fill="#3b82f6" fillOpacity={0.5} />
-                  <Tooltip contentStyle={{ borderRadius: '12px', border: 'none', boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)' }} />
-                </RadarChart>
-              </ResponsiveContainer>
-            </div>
-          </div>
-
-          {/* B. Diagram Analisis CPMK */}
-          <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-6">
-            <div className="flex justify-between items-center mb-6">
-              <h3 className="text-lg font-bold text-gray-800">Analisis Poin CPMK</h3>
-              {activeMKId && (
-                <span className="text-[10px] bg-blue-100 text-blue-700 px-3 py-1 rounded-full font-bold">
-                  MK: {mappingData.flatMap(m => m.mataKuliah).find(mk => mk.id_mk === activeMKId)?.kode}
-                </span>
-              )}
-            </div>
-
-            {activeMKId ? (
-              <div className="space-y-6">
-                {/* Bar Chart Poin Kontribusi (Bukan Nilai Mentah) */}
-                <div className="h-[220px] w-full">
-                  <ResponsiveContainer width="100%" height="100%">
-                    {/* Gunakan data yang sudah diolah (chartCPMKData) */}
-                    <BarChart data={chartCPMKData}>
-                      <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
-                      <XAxis dataKey="kode_cpmk" fontSize={10} tick={{fill: '#475569'}} />
-                      <YAxis fontSize={10} label={{ value: 'Poin Kontribusi', angle: -90, position: 'insideLeft', style: {fontSize: 10} }} />
-                      <Tooltip 
-                        cursor={{fill: 'rgba(59, 130, 246, 0.05)'}}
-                        content={({ active, payload, label }) => {
-                          if (active && payload && payload.length) {
-                            const data = payload[0].payload;
-                            return (
-                              <div className="bg-white p-2 border border-gray-200 rounded shadow-sm text-xs">
-                                <p className="font-bold">{label}</p>
-                                <p>Nilai: {data.nilai}</p>
-                                <p>Bobot: {data.bobotReal}%</p>
-                                <p className="font-bold text-blue-600">Kontribusi: {data.nilaiKontribusi} Poin</p>
-                              </div>
-                            );
-                          }
-                          return null;
-                        }}
-                      />
-                      <Bar dataKey="nilaiKontribusi" name="Poin Kontribusi" radius={[4, 4, 0, 0]} barSize={40}>
-                        {chartCPMKData.map((entry, index) => (
-                          <Cell key={`cell-${index}`} fill={entry.fillColor} />
-                        ))}
-                        <LabelList dataKey="nilaiKontribusi" position="top" style={{fontSize: 10, fill: '#64748b'}} />
-                      </Bar>
-                    </BarChart>
-                  </ResponsiveContainer>
-                </div>
-
-                {/* List Detail Hasil Analisis */}
-                <div className="space-y-3 max-h-[300px] overflow-y-auto pr-2">
-                  {chartCPMKData.map((scoreData, idx) => (
-                    <div key={idx} className="p-4 bg-gray-50 rounded-xl border border-gray-100">
-                      <div className="flex justify-between items-center mb-2">
-                        <span className="text-xs font-bold text-gray-700">{scoreData.kode_cpmk}</span>
-                        {/* Tampilkan Poin Kontribusi */}
-                        <span className={`text-xs font-bold ${scoreData.nilai >= 70 ? 'text-blue-600' : 'text-amber-600'}`}>
-                          Poin: {scoreData.nilaiKontribusi} <span className="text-[10px] text-gray-400 font-normal">/ {scoreData.bobotReal}</span>
-                        </span>
-                      </div>
-                      
-                      {/* Progress Bar (Visualisasi Poin terhadap Bobot Maksimal) */}
-                      <div className="w-full bg-gray-200 rounded-full h-1.5 mb-3">
-                        <div 
-                          className={`h-1.5 rounded-full ${scoreData.nilai >= 70 ? 'bg-blue-600' : 'bg-amber-500'}`} 
-                          style={{ width: `${(scoreData.nilaiKontribusi / (scoreData.bobotReal || 1)) * 100}%` }}
-                        ></div>
-                      </div>
-
-                      <p className="text-[9px] font-bold text-emerald-600/70 uppercase tracking-wider mb-2">Sub-CPMK & Indikator:</p>
-                      <div className="space-y-2">
-                        {scoreData.sub_cpmks?.map((sub: any, sIdx: number) => {
-                          return (
-                            <div key={sIdx} className="flex justify-between bg-white p-2 rounded-lg text-[10px] border border-gray-100">
-                              <span className="text-gray-500 flex-1">{sub.kode_sub_cpmk}. {sub.deskripsi}</span>
-                              {/* Hilangkan tampilan nilai Sub-CPMK */}
-                            </div>
-                          );
-                        })}
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            ) : (
-              <div className="h-[530px] flex flex-col items-center justify-center text-center p-6 border-2 border-dashed border-gray-100 rounded-xl">
-                <div className="w-16 h-16 bg-gray-50 rounded-full flex items-center justify-center mb-4 text-2xl">🖱️</div>
-                <p className="text-gray-400 text-sm font-medium">Klik salah satu Mata Kuliah di timeline untuk melihat analisis CPMK mahasiswa</p>
-              </div>
-            )}
-          </div>
-        </div>
-      </div>
-
-      {/* 5. DETAIL TABLE */}
-      <div className="bg-white rounded-2xl shadow-sm border border-gray-100 overflow-hidden">
-        <div className="p-4 bg-blue-50 border-b border-blue-100">
-          <h3 className="text-lg font-bold text-gray-800">Tabel Rincian Capaian CPL</h3>
-        </div>
-        <div className="overflow-x-auto">
-          <table className="w-full text-left text-sm">
-            <thead className="bg-gray-50">
-              <tr>
-                <th className="px-6 py-3 font-bold text-gray-700">Kode</th>
-                <th className="px-6 py-3 font-bold text-gray-700">Deskripsi</th>
-                <th className="px-6 py-3 font-bold text-gray-700 text-center">MK</th>
-                <th className="px-6 py-3 font-bold text-gray-700 text-center">Nilai</th>
-                <th className="px-6 py-3 font-bold text-gray-700 text-center">Status</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-gray-200">
-              {mappingData.map((item, idx) => {
-                const isMissingData = item.mkCount === 0;
-                const score = cplScores.find(s => s.kode === item.cpl.kode);
-                const val = score?.nilai ?? 0;
-                return (
-                  <tr key={idx} className={`hover:bg-gray-50 ${isMissingData ? 'bg-red-50' : ''}`}>
-                    <td className={`px-6 py-4 font-bold ${isMissingData ? 'text-red-600' : 'text-blue-600'}`}>{item.cpl.kode}</td>
-                    <td className={`px-6 py-4 ${isMissingData ? 'text-red-500' : 'text-gray-600'}`}>{item.cpl.deskripsi}</td>
-                    <td className="px-6 py-2 text-center">
-                      <span className={`px-5 py-1 rounded text-xs ${isMissingData ? 'bg-red-200 text-red-800' : 'bg-gray-100 text-gray-700'}`}>{item.mkCount} MK</span>
-                    </td>
-                    <td className="px-6 py-4 text-center font-bold">{isMissingData ? '-' : val}</td>
-                    <td className="px-4 py-4 text-center">
-                      <span className={`px-10 py-1 rounded-full text-[10px] font-bold ${
-                        isMissingData ? 'bg-red-100 text-red-600 border border-red-300' :
-                        val > 69 ? 'bg-green-100 text-green-700' : 
-                        val > 49? 'bg-yellow-100 text-yellow-700' :
-                        val < 50 ? 'bg-red-100 text-red-700' : 'bg-red-100 text-red-700'
-                      }`}>
-                        {isMissingData ? 'Tidak Ada MK' : (score?.status ?? 'Belum Ada Nilai')}
-                      </span>
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        </div>
-      </div>
-    </div>
+          </ul>
+        </>
+      )}
+    </section>
   );
 }
