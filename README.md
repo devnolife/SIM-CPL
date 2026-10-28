@@ -270,7 +270,8 @@ Branch `demo/vercel` bisa di-deploy ke Vercel apa adanya. Framework Next.js terd
 `.env` sudah menyalakan mode data contoh, jadi tidak perlu backend maupun variabel lingkungan tambahan.
 
 ```bash
-npx vercel deploy --prod
+npx vercel login          # sekali saja, setujui di browser
+npx vercel deploy --prod  # pertama kali: jawab pertanyaan penyiapan, mis. nama proyek sim-cpl-demo
 ```
 
 ### Antarmuka
