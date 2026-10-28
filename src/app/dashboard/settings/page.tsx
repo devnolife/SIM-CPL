@@ -8,6 +8,8 @@ import { currentTahunAjaran, saveConfig, useConfig, validThresholds, type SimCon
 import { STATUS_HEX } from '@/lib/status';
 import { Field, PageHeader } from '@/components/sim/ui';
 
+const MOCK_API = process.env.NEXT_PUBLIC_MOCK_API === '1';
+
 export default function PengaturanPage() {
   const config = useConfig();
   const [savedAt, setSavedAt] = useState<Date | null>(null);
@@ -55,7 +57,9 @@ function SettingsForm({ initial, savedAt, onSave }: { initial: SimConfig; savedA
   const resetAll = () => {
     localStorage.clear();
     document.cookie = 'simcpl_token=; path=/; max-age=0';
-    router.push('/login');
+    // Mock API di peramban menyimpan data di memori; muat ulang penuh agar ikut kembali ke data awal.
+    if (MOCK_API) window.location.assign('/login');
+    else router.push('/login');
   };
 
   return (
@@ -155,7 +159,14 @@ function SettingsForm({ initial, savedAt, onSave }: { initial: SimConfig; savedA
         </div>
       </SettingsSection>
 
-      <SettingsSection title="Atur ulang" description="Menghapus pengaturan dan sesi yang tersimpan di peramban ini, lalu kembali ke halaman masuk. Nilai di server tidak terhapus.">
+      <SettingsSection
+        title="Atur ulang"
+        description={
+          MOCK_API
+            ? 'Menghapus pengaturan, sesi, dan perubahan nilai contoh yang tersimpan di peramban ini, lalu kembali ke halaman masuk.'
+            : 'Menghapus pengaturan dan sesi yang tersimpan di peramban ini, lalu kembali ke halaman masuk. Nilai di server tidak terhapus.'
+        }
+      >
         {!confirmReset ? (
           <button type="button" className="btn btn-danger" onClick={() => setConfirmReset(true)}>
             Atur ulang dan keluar…
@@ -163,7 +174,7 @@ function SettingsForm({ initial, savedAt, onSave }: { initial: SimConfig; savedA
         ) : (
           <div role="alertdialog" aria-labelledby="reset-q" className="flex flex-wrap items-center gap-3 rounded-md border border-bad/30 bg-bad-bg px-3 py-2.5">
             <p id="reset-q" className="text-[13.5px] text-bad-fg">
-              Pengaturan dan penandatangan akan kembali kosong. Lanjutkan?
+              Pengaturan dan penandatangan akan kembali kosong{MOCK_API && ', dan nilai contoh kembali seperti semula'}. Lanjutkan?
             </p>
             <div className="flex gap-2">
               <button type="button" className="btn btn-sm bg-bad text-white hover:bg-bad-fg" onClick={resetAll} autoFocus>

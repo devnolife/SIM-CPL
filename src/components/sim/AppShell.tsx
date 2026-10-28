@@ -15,6 +15,7 @@ const NAV = [
 ];
 
 const IS_DEMO = process.env.NEXT_PUBLIC_DEMO === '1';
+const MOCK_API = process.env.NEXT_PUBLIC_MOCK_API === '1';
 
 function isActive(pathname: string, href: string) {
   return href === '/dashboard' ? pathname === href : pathname === href || pathname.startsWith(`${href}/`);
@@ -81,7 +82,11 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
           <div className="ml-auto flex items-center gap-3">
             {IS_DEMO && (
               <span
-                title="Aplikasi berjalan dengan mock-server.cjs. Nilai berasal dari Data-Example, bukan database kampus."
+                title={
+                  MOCK_API
+                    ? 'Data contoh dijalankan di peramban ini, bukan database kampus. Nilai yang Anda ubah hanya tersimpan di peramban ini.'
+                    : 'Aplikasi berjalan dengan mock-server.cjs. Nilai berasal dari Data-Example, bukan database kampus.'
+                }
                 className="hidden rounded border border-white/15 px-2 py-0.5 text-[12px] text-ink-200 sm:inline"
               >
                 Data contoh

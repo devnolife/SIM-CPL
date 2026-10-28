@@ -244,24 +244,34 @@ npm run dev
 
 ### Menjalankan tanpa backend (data contoh)
 
-`mock-server.cjs` menyajikan seluruh endpoint yang dipakai frontend di port 8001 dengan data contoh:
-kurikulum INF (semester 1–4) dan ARS (semester 1–2) dari `MK_CODES.md`, serta nilai dari `Data-Example/*.csv`.
-Nilai CPL dihitung dengan rumus yang sama dengan backend Go (`internal/service/cpl_service.go`).
+Data contoh: kurikulum INF (semester 1–4) dan ARS (semester 1–2) dari `MK_CODES.md`, serta nilai dari
+`Data-Example/*.csv`. Nilai CPL dihitung dengan rumus yang sama dengan backend Go
+(`internal/service/cpl_service.go`). Data dan seluruh endpoint ada di `mock/api.mjs`, yang bisa dipakai
+dengan dua cara:
+
+| Cara | Pengaturan | Nilai yang diubah tersimpan di |
+|---|---|---|
+| Di peramban (bawaan branch ini, dipakai demo Vercel) | `.env`: `NEXT_PUBLIC_MOCK_API=1` | `localStorage` peramban masing-masing |
+| Server HTTP `npm run mock` (port 8001) | `.env.local`: `NEXT_PUBLIC_MOCK_API=0` dan `NEXT_PUBLIC_API_URL=http://localhost:8001/api` | Memori server mock; hilang saat server dimatikan |
+
+Untuk backend Go, isi `.env.local` dengan `NEXT_PUBLIC_MOCK_API=0`, `NEXT_PUBLIC_DEMO=0`, dan
+`NEXT_PUBLIC_API_URL` alamat backend.
 
 ```bash
-# .env.local
-NEXT_PUBLIC_API_URL=http://localhost:8001/api
-NEXT_PUBLIC_DEMO=1        # menampilkan penanda "Data contoh" di antarmuka
-
-# terminal 1
-npm run mock
-
-# terminal 2
-npm run dev
+npm run dev   # mode peramban: cukup satu perintah, tanpa server lain
 ```
 
-Masuk dengan `kaprodi` / `kaprodi123`. Nilai yang diinput atau diimpor hanya tersimpan di memori
-server mock dan hilang saat server dimatikan.
+Masuk dengan `kaprodi` / `kaprodi123`. **Pengaturan → Atur ulang** mengembalikan data contoh di peramban
+itu ke keadaan awal.
+
+### Demo di Vercel
+
+Branch `demo/vercel` bisa di-deploy ke Vercel apa adanya. Framework Next.js terdeteksi otomatis, dan
+`.env` sudah menyalakan mode data contoh, jadi tidak perlu backend maupun variabel lingkungan tambahan.
+
+```bash
+npx vercel deploy --prod
+```
 
 ### Antarmuka
 

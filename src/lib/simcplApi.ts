@@ -2,6 +2,9 @@
 // Satu-satunya tempat halaman berbicara dengan backend SIM-CPL (Go/Gin).
 // Bentuk respons mengikuti handler di branch Backend; beberapa endpoint punya
 // lebih dari satu bentuk historis, jadi dinormalisasi di sini.
+// Bila NEXT_PUBLIC_MOCK_API=1, permintaan dijawab mock API di peramban (mockFetch.ts).
+
+import { mockFetch } from './mockFetch';
 
 export type Prodi = {
   id_prodi: number;
@@ -136,7 +139,10 @@ function normalizeBaseUrl(raw: unknown): string {
   return base.endsWith('/') ? base.slice(0, -1) : base;
 }
 
-export const API_BASE: string = normalizeBaseUrl(process.env.NEXT_PUBLIC_API_URL);
+/** Demo tanpa backend: data contoh dijalankan di peramban (lihat mockFetch.ts). */
+const MOCK_API = process.env.NEXT_PUBLIC_MOCK_API === '1';
+
+export const API_BASE: string = MOCK_API ? '/api' : normalizeBaseUrl(process.env.NEXT_PUBLIC_API_URL);
 
 function apiUrl(path: string): string {
   return `${API_BASE}${path.startsWith('/') ? path : `/${path}`}`;
@@ -149,15 +155,20 @@ export class ApiError extends Error {
 }
 
 async function fetchJson<T>(path: string, init?: RequestInit): Promise<T> {
+  const url = apiUrl(path);
+  const options: RequestInit = {
+    ...init,
+    headers: { 'ngrok-skip-browser-warning': 'true', ...(init?.headers ?? {}) },
+  };
   let res: Response;
   try {
-    res = await fetch(apiUrl(path), {
-      ...init,
-      headers: { 'ngrok-skip-browser-warning': 'true', ...(init?.headers ?? {}) },
-    });
+    res = await (MOCK_API ? mockFetch(url, options) : fetch(url, options));
   } catch (err) {
     if ((err as Error).name === 'AbortError') throw err;
-    throw new ApiError(0, `Server SIM-CPL tidak dapat dihubungi (${API_BASE}).`);
+    throw new ApiError(
+      0,
+      MOCK_API ? 'Data contoh gagal dimuat. Muat ulang halaman.' : `Server SIM-CPL tidak dapat dihubungi (${API_BASE}).`,
+    );
   }
   if (!res.ok) {
     let detail = '';
